@@ -1,0 +1,106 @@
+#!/bin/sh
+
+# Copyright (c) 2022 by J.W https://github.com/jakwings/sandbox-exec
+#
+#   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+#
+#  0. You just DO WHAT THE FUCK YOU WANT TO.
+
+set -euf; unset -v IFS; export LC_ALL=C
+
+name="$(basename -- "$0")"
+self="${PWD}/${name}"
+home="${HOME:?empty!}"
+
+# NOTE: not perfect but enough against simple spyware-like software
+# /System/Library/Sandbox/Profiles
+# /Library/Sandbox/Profiles
+# /usr/share/sandbox
+# https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf
+# https://papers.put.as/papers/macosx/2011/The-Apple-Sandbox-BHDC2011-Paper.pdf
+# strings -a /usr/libexec/sandboxd | less  # functions, macros, aliases, ...
+exec sandbox-exec -D HOME="${home}" -D SELF="${self}" -p '
+(version 1)
+
+;; NOTE: later matching rules take priority over previous ones
+(debug deny)
+(allow default)
+
+;; Uncomment the following rules to report violations when testing a change and
+;;     sysctl security.mac.sandbox.debug_mode=544  # not working anymore ?
+;;     log stream --style compact --level debug --predicate "(((processID == 0) AND (senderImagePath CONTAINS \"/Sandbox\")) OR (subsystem == \"com.apple.sandbox.reporting\"))"
+;; to see verbose violation reporting.
+;;
+;(trace "/tmp/sandbox.trace")  ; not working/needed anymore ?
+;(debug all)  ; for [com.apple.sandbox.reporting]
+;(allow default (with report))
+
+;(deny process-exec*)
+;(deny process-fork (with no-report))
+
+; also deny file-write-unlink
+(define $no-internet (literal (param "SELF")))
+(deny file-write* $no-internet)
+(allow process-exec* $no-internet (with no-sandbox))
+
+(define (home-literal home-relative-literal)
+   (literal (string-append (param "HOME") home-relative-literal)) )
+
+(define (deny-system-network)
+   (deny file-read*
+      (literal "/Library/Preferences/com.apple.networkd.plist")
+      (literal "/private/var/db/nsurlstoraged/dafsaData.bin") )
+   (deny mach-lookup
+      (global-name "com.apple.SystemConfiguration.PPPController")
+      (global-name "com.apple.SystemConfiguration.SCNetworkReachability")
+      (global-name "com.apple.dnssd.service")
+      (global-name "com.apple.nehelper")
+      (global-name "com.apple.nesessionmanager")
+      (global-name "com.apple.networkd")
+      (global-name "com.apple.symptomsd")
+      (global-name "com.apple.usymptomsd") )
+   (deny network-outbound
+      (control-name "com.apple.netsrc")
+      (control-name "com.apple.network.statistics") )
+   (deny system-socket
+      (require-all
+         (socket-domain AF_SYSTEM)
+         (socket-protocol 2) ) ; SYSPROTO_CONTROL
+      (socket-domain AF_ROUTE) )
+   ;; AppSSO support
+   (deny mach-lookup
+      (global-name "com.apple.AppSSO.service-xpc") )
+   (deny ipc-posix-shm-read-data
+      (ipc-posix-name "/com.apple.AppSSO.version") ) )
+(deny-system-network)
+
+(deny mach-lookup
+   (global-name "com.apple.airportd")
+   (global-name "com.apple.cfnetwork.AuthBrokerAgent")
+   (global-name "com.apple.cfnetwork.cfnetworkagent")
+   (global-name "com.apple.nesessionmanager.content-filter")
+   (global-name "com.apple.nsurlsessiond")
+   (global-name "com.apple.NetworkDiagnostic.agent")
+   (global-name "com.apple.WebKit.PluginAgent") )
+
+(deny mach-lookup (global-name "org.h5l.kcm"))
+(deny authorization-right-obtain (right-name "com.apple.KerberosAgent"))
+(deny file-read*
+   (literal "/Library/Preferences/edu.mit.Kerberos")
+   (literal "/Library/Preferences/com.apple.Kerberos.plist")
+   (literal "/private/etc/krb5.conf")
+   (regex "^/Library/Preferences/com\\.apple\\.GSS\\..*\\.plist$")
+   (home-literal "/Library/Preferences/edu.mit.Kerberos")
+   (home-literal "/Library/Preferences/com.apple.Kerberos.plist") )
+
+; https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/sandbox/DarwinSandboxedSpawnRunner.java
+(deny network*)
+;(allow network* (local ip "localhost:*"))
+;(allow network* (remote ip "localhost:*"))
+;(allow network* (remote unix-socket))
+
+;; DNS lookup
+(deny network-outbound
+   (remote unix-socket (path-literal "/private/var/run/mDNSResponder")) )
+(deny network-outbound (literal "/private/var/run/mDNSResponder"))
+' "$@"
